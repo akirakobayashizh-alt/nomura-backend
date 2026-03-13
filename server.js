@@ -28,13 +28,13 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const JWT_SECRET = 'nomura_forex_secreto_2026';
 
-// --- CREDENCIALES DE CLEVER CLOUD ---
+// --- CREDENCIALES DE CLEVER CLOUD (VERSIÓN PRO) ---
 const dbConfig = { 
-    host: 'bpuud8bxkjlwplv68bgs-mysql.services.clever-cloud.com', 
-    port: 3306, 
+    host: 'hv-par6-004.clvrcld.net', 
+    port: 11534, 
     user: 'udpmcmp4kdbun85y', 
     password: 'GjcaNGfXmndAB3FbskPN', 
-    database: 'bpuud8bxkjlwplv68bgs' 
+    database: 'b7epilwsbbgdnvz33xix' 
 };
 
 const verificarToken = (req, res, next) => {
