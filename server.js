@@ -165,45 +165,36 @@ io.on('connection', (socket) => {
     });
 });
 
-app.get('/api/chat/mi-historial', verificarToken, async (req, res) => {
-    try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [rows] = await conn.execute('SELECT is_admin, mensaje FROM support_messages WHERE user_id = ? ORDER BY fecha ASC', [req.user.id]);
-        await conn.end(); res.json(rows);
-    } catch(e) { res.status(500).json({error: 'Error'}); }
-});
-
-app.get('/api/admin/chat/usuarios', async (req, res) => {
-    try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [rows] = await conn.execute('SELECT DISTINCT u.id, u.nombre FROM support_messages s JOIN users u ON s.user_id = u.id');
-        await conn.end(); res.json(rows);
-    } catch(e) { res.status(500).json({error: 'Error'}); }
-});
-
-app.get('/api/admin/chat/historial/:id', async (req, res) => {
-    try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [rows] = await conn.execute('SELECT is_admin, mensaje FROM support_messages WHERE user_id = ? ORDER BY fecha ASC', [req.params.id]);
-        await conn.end(); res.json(rows);
-    } catch(e) { res.status(500).json({error: 'Error'}); }
-});
-
+// =========================================================
+// RUTA HISTORIAL GRAFICO (MODIFICADA CON PUENTE MÁGICO)
+// =========================================================
 app.get('/api/historial-grafico', async (req, res) => {
     const { symbol, interval } = req.query;
+    
+    // --- GRÁFICO DE BULLION (MERCADO SINTÉTICO) ---
     if (symbol === 'BULLIONUSDT') {
         try {
-            const conn = await mysql.createConnection(dbConfig);
-            const [rows] = await conn.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY fecha ASC LIMIT 1000');
-            await conn.end(); return res.json(rows);
-        } catch (e) { return res.status(500).json({ error: 'Error DB' }); }
+            // 1. Traemos la historia desde la base de datos usando el Pool rápido
+            const [rows] = await pool.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY fecha ASC LIMIT 1000');
+            
+            // 2. EL PUENTE MÁGICO: Le pegamos el precio vivo exacto de este milisegundo al final de la gráfica
+            rows.push({ time: Math.floor(Date.now() / 1000), value: bullionPrice });
+            
+            return res.json(rows);
+        } catch (e) { 
+            return res.status(500).json({ error: 'Error DB' }); 
+        }
     }
+    
+    // --- GRÁFICOS REALES DE BINANCE ---
     try {
         let limit = 1000;
         const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
         const data = await response.json();
         res.json(data.map(d => ({ time: d[0] / 1000, value: parseFloat(d[4]) })));
-    } catch (error) { res.status(500).json({ error: 'Error Binance' }); }
+    } catch (error) { 
+        res.status(500).json({ error: 'Error Binance' }); 
+    }
 });
 
 // --- SISTEMA DE REGISTRO Y RECUPERACIÓN ---
