@@ -40,7 +40,7 @@ const io = new Server(server, { cors: { origin: "*" } });
 const JWT_SECRET = 'nomura_forex_secreto_2026';
 
 // =========================================================
-// 2. CONEXIÓN PRO A CLEVER CLOUD (RUTA DIRECTA)
+// 2. CONEXIÓN PRO A CLEVER CLOUD (RUTA DIRECTA Y POOL)
 // =========================================================
 const dbConfig = {
     host: 'hv-par6-004.clvrcld.net',
@@ -50,6 +50,7 @@ const dbConfig = {
     database: 'b7epi1wsbbgdnvz33xix'
 };
 
+// POOL GENERAL (Conexiones ultrarrápidas y seguras)
 const pool = mysql.createPool(dbConfig);
 
 const verificarToken = (req, res, next) => {
@@ -76,18 +77,17 @@ function connectBinance() {
 let preciosActuales = {};
 connectBinance();
 
-let bullionPrice = 5200.00, b_targetPrice = null, b_step = 0, b_endTime = 0, lastSaveTime = 0;
+let bullionPrice = 5200.00, b_targetPrice = null, b_step = 0, b_endTime = 0;
 async function cargarPrecioBullion() {
     try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [rows] = await conn.execute('SELECT precio FROM bullion_history ORDER BY id DESC LIMIT 1');
+        const [rows] = await pool.execute('SELECT precio FROM bullion_history ORDER BY id DESC LIMIT 1');
         if (rows.length > 0) bullionPrice = parseFloat(rows[0].precio);
         preciosActuales['BULLIONUSDT'] = { price: bullionPrice, change: 0 };
-        await conn.end();
     } catch (e) { console.error("Aviso: Aún no hay historial de Bullion."); }
 }
 cargarPrecioBullion();
 
+// 🔥 MOTOR DE BULLION (GUARDADO CADA 2 SEGUNDOS EXACTOS SIN LIMITES)
 setInterval(async () => {
     let now = Date.now();
     if (b_targetPrice && now < b_endTime) bullionPrice += b_step;
@@ -101,20 +101,17 @@ setInterval(async () => {
     preciosActuales['BULLIONUSDT'] = { price: bullionPrice, change: 0 };
     io.emit('precio_actualizado', { symbol: 'BULLIONUSDT', precio: bullionPrice, cambio: 0 });
 
-    if (now - lastSaveTime > 60000) {
-        try {
-            const conn = await mysql.createConnection(dbConfig);
-            await conn.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
-            await conn.end(); lastSaveTime = now;
-        } catch (e) {}
+    try {
+        await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
+    } catch (e) {
+        console.error("Error guardando historial:", e);
     }
 }, 2000);
 
 // --- VIGILANTE DE TP Y SL ---
 setInterval(async () => {
     try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [abiertas] = await conn.execute('SELECT * FROM trades WHERE estado = "abierta"');
+        const [abiertas] = await pool.execute('SELECT * FROM trades WHERE estado = "abierta"');
         for (let trade of abiertas) {
             if (!trade.tp && !trade.sl) continue;
             const liveData = preciosActuales[trade.criptomoneda];
@@ -133,12 +130,11 @@ setInterval(async () => {
             if (closeTrade) {
                 const varPct = (livePrice - trade.precio_entrada) / trade.precio_entrada;
                 let pnl = trade.tipo_operacion === 'compra_long' ? (varPct * trade.monto_invertido) : (-varPct * trade.monto_invertido);
-                await conn.execute('UPDATE trades SET estado = "cerrada", precio_cierre = ?, ganancia_perdida = ? WHERE id = ?', [livePrice, pnl, trade.id]);
-                await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [parseFloat(trade.monto_invertido) + pnl, trade.user_id]);
+                await pool.execute('UPDATE trades SET estado = "cerrada", precio_cierre = ?, ganancia_perdida = ? WHERE id = ?', [livePrice, pnl, trade.id]);
+                await pool.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [parseFloat(trade.monto_invertido) + pnl, trade.user_id]);
                 io.emit('auto_close', { user_id: trade.user_id, trade_id: trade.id, motivo: motivo, pnl: pnl.toFixed(2) });
             }
         }
-        await conn.end();
     } catch (e) {}
 }, 2000); 
 
@@ -147,9 +143,7 @@ io.on('connection', (socket) => {
     socket.on('mensaje_usuario', async (data) => {
         try {
             const decoded = jwt.verify(data.token, JWT_SECRET);
-            const conn = await mysql.createConnection(dbConfig);
-            await conn.execute('INSERT INTO support_messages (user_id, is_admin, mensaje) VALUES (?, false, ?)', [decoded.id, data.mensaje]);
-            await conn.end();
+            await pool.execute('INSERT INTO support_messages (user_id, is_admin, mensaje) VALUES (?, false, ?)', [decoded.id, data.mensaje]);
             io.emit('chat_actualizado', { user_id: decoded.id, nombre: decoded.nombre, mensaje: data.mensaje, is_admin: false });
         } catch (e) {}
     });
@@ -157,36 +151,49 @@ io.on('connection', (socket) => {
     socket.on('mensaje_admin', async (data) => {
         try {
             jwt.verify(data.token, JWT_SECRET); 
-            const conn = await mysql.createConnection(dbConfig);
-            await conn.execute('INSERT INTO support_messages (user_id, is_admin, mensaje) VALUES (?, true, ?)', [data.user_id, data.mensaje]);
-            await conn.end();
+            await pool.execute('INSERT INTO support_messages (user_id, is_admin, mensaje) VALUES (?, true, ?)', [data.user_id, data.mensaje]);
             io.emit('chat_actualizado', { user_id: data.user_id, nombre: 'Soporte Nomura', mensaje: data.mensaje, is_admin: true });
         } catch (e) {}
     });
 });
 
+app.get('/api/chat/mi-historial', verificarToken, async (req, res) => {
+    try {
+        const [rows] = await pool.execute('SELECT is_admin, mensaje FROM support_messages WHERE user_id = ? ORDER BY fecha ASC', [req.user.id]);
+        res.json(rows);
+    } catch(e) { res.status(500).json({error: 'Error'}); }
+});
+
+app.get('/api/admin/chat/usuarios', async (req, res) => {
+    try {
+        const [rows] = await pool.execute('SELECT DISTINCT u.id, u.nombre FROM support_messages s JOIN users u ON s.user_id = u.id');
+        res.json(rows);
+    } catch(e) { res.status(500).json({error: 'Error'}); }
+});
+
+app.get('/api/admin/chat/historial/:id', async (req, res) => {
+    try {
+        const [rows] = await pool.execute('SELECT is_admin, mensaje FROM support_messages WHERE user_id = ? ORDER BY fecha ASC', [req.params.id]);
+        res.json(rows);
+    } catch(e) { res.status(500).json({error: 'Error'}); }
+});
+
 // =========================================================
-// RUTA HISTORIAL GRAFICO (MODIFICADA CON PUENTE MÁGICO)
+// RUTA HISTORIAL GRAFICO (RESTAURADA PARA TIEMPO REAL)
 // =========================================================
 app.get('/api/historial-grafico', async (req, res) => {
     const { symbol, interval } = req.query;
     
-    // --- GRÁFICO DE BULLION (MERCADO SINTÉTICO) ---
     if (symbol === 'BULLIONUSDT') {
         try {
-            // 1. Traemos la historia desde la base de datos usando el Pool rápido
+            // Leemos directo de la BD, que ahora siempre tiene el precio de este mismo milisegundo
             const [rows] = await pool.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY fecha ASC LIMIT 1000');
-            
-            // 2. EL PUENTE MÁGICO: Le pegamos el precio vivo exacto de este milisegundo al final de la gráfica
-            rows.push({ time: Math.floor(Date.now() / 1000), value: bullionPrice });
-            
             return res.json(rows);
         } catch (e) { 
             return res.status(500).json({ error: 'Error DB' }); 
         }
     }
     
-    // --- GRÁFICOS REALES DE BINANCE ---
     try {
         let limit = 1000;
         const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
@@ -253,9 +260,7 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
 // --- LOGIN CON EXCLUSIVIDAD DE ADMIN ---
 app.post('/api/login', async (req, res) => {
     try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [users] = await conn.execute('SELECT * FROM users WHERE email = ?', [req.body.email]);
-        await conn.end();
+        const [users] = await pool.execute('SELECT * FROM users WHERE email = ?', [req.body.email]);
 
         if (users.length === 0) return res.status(401).json({ error: 'Credenciales inválidas' });
         const user = users[0];
@@ -282,26 +287,26 @@ app.post('/api/recuperar-password', upload.single('documento_recuperacion'), asy
         const doc = req.file ? '/uploads/' + req.file.filename : null;
         if (!email || !telefono || !doc) return res.status(400).json({ error: 'Faltan datos' });
 
-        const conn = await mysql.createConnection(dbConfig);
-        const [exist] = await conn.execute('SELECT * FROM users WHERE email = ?', [email]);
+        const [exist] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
         if (exist.length === 0) return res.status(400).json({ error: 'El correo no existe en el sistema' });
 
-        await conn.execute('INSERT INTO password_resets (email, telefono, documento_identidad) VALUES (?, ?, ?)', [email, telefono, doc]);
-        await conn.end();
+        await pool.execute('INSERT INTO password_resets (email, telefono, documento_identidad) VALUES (?, ?, ?)', [email, telefono, doc]);
         res.json({ mensaje: 'Solicitud enviada al Administrador. Espere aprobación.' });
     } catch (e) { res.status(500).json({ error: 'Error al solicitar recuperación' }); }
 });
 
 app.get('/api/user/perfil', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [users] = await conn.execute('SELECT nombre, saldo_demo, mi_codigo FROM users WHERE id = ?', [req.user.id]);
-    await conn.end(); res.json(users[0]);
+    try {
+        const [users] = await pool.execute('SELECT nombre, saldo_demo, mi_codigo FROM users WHERE id = ?', [req.user.id]);
+        res.json(users[0]);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/user/recarga', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    await conn.execute('INSERT INTO transactions (user_id, tipo, monto) VALUES (?, "recarga", ?)', [req.user.id, req.body.monto]);
-    await conn.end(); res.json({ mensaje: 'Solicitud enviada.' });
+    try {
+        await pool.execute('INSERT INTO transactions (user_id, tipo, monto) VALUES (?, "recarga", ?)', [req.user.id, req.body.monto]);
+        res.json({ mensaje: 'Solicitud enviada.' });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/user/retiro', verificarToken, upload.single('documento_retiro'), async (req, res) => {
@@ -310,99 +315,106 @@ app.post('/api/user/retiro', verificarToken, upload.single('documento_retiro'), 
         const doc = req.file ? '/uploads/' + req.file.filename : null;
         if (!monto || monto <= 0 || !billetera || !doc) return res.status(400).json({ error: 'Datos incompletos' });
 
-        const conn = await mysql.createConnection(dbConfig);
-        const [users] = await conn.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
+        const [users] = await pool.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
         if (users[0].saldo_demo < monto) return res.status(400).json({ error: 'Saldo insuficiente' });
 
-        await conn.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto, req.user.id]); 
-        await conn.execute('INSERT INTO transactions (user_id, tipo, monto, billetera_retiro, documento_retiro) VALUES (?, "retiro", ?, ?, ?)', [req.user.id, monto, billetera, doc]);
-        await conn.end();
+        await pool.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto, req.user.id]); 
+        await pool.execute('INSERT INTO transactions (user_id, tipo, monto, billetera_retiro, documento_retiro) VALUES (?, "retiro", ?, ?, ?)', [req.user.id, monto, billetera, doc]);
         res.json({ mensaje: 'Solicitud de retiro en proceso.' });
     } catch (e) { res.status(500).json({ error: 'Error al procesar retiro' }); }
 });
 
 app.post('/api/trade/abrir', verificarToken, async (req, res) => {
-    const { criptomoneda, tipo_operacion, monto_invertido, tp, sl } = req.body;
-    const precio_entrada = preciosActuales[criptomoneda]?.price;
-    if (!precio_entrada) return res.status(400).json({ error: 'Precio no disponible' });
+    try {
+        const { criptomoneda, tipo_operacion, monto_invertido, tp, sl } = req.body;
+        const precio_entrada = preciosActuales[criptomoneda]?.price;
+        if (!precio_entrada) return res.status(400).json({ error: 'Precio no disponible' });
 
-    const conn = await mysql.createConnection(dbConfig);
-    const [users] = await conn.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
-    if (users[0].saldo_demo < monto_invertido) return res.status(400).json({ error: 'Saldo insuficiente' });
+        const [users] = await pool.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
+        if (users[0].saldo_demo < monto_invertido) return res.status(400).json({ error: 'Saldo insuficiente' });
 
-    await conn.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto_invertido, req.user.id]);
-    const [result] = await conn.execute(
-        'INSERT INTO trades (user_id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp, sl) VALUES (?, ?, ?, ?, ?, ?, ?)', 
-        [req.user.id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp || null, sl || null]
-    );
-    await conn.end(); res.json({ mensaje: 'Orden abierta', trade_id: result.insertId, precio_entrada });
+        await pool.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto_invertido, req.user.id]);
+        const [result] = await pool.execute(
+            'INSERT INTO trades (user_id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp, sl) VALUES (?, ?, ?, ?, ?, ?, ?)', 
+            [req.user.id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp || null, sl || null]
+        );
+        res.json({ mensaje: 'Orden abierta', trade_id: result.insertId, precio_entrada });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/trade/cerrar', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [trades] = await conn.execute('SELECT * FROM trades WHERE id = ? AND user_id = ? AND estado = "abierta"', [req.body.trade_id, req.user.id]);
-    if (trades.length === 0) return res.status(404).json({ error: 'No encontrada' });
-    
-    const trade = trades[0], precio_cierre = preciosActuales[trade.criptomoneda]?.price;
-    const varPct = (precio_cierre - trade.precio_entrada) / trade.precio_entrada;
-    let pnl = trade.tipo_operacion === 'compra_long' ? (varPct * trade.monto_invertido) : (-varPct * trade.monto_invertido);
-    
-    await conn.execute('UPDATE trades SET estado = "cerrada", precio_cierre = ?, ganancia_perdida = ? WHERE id = ?', [precio_cierre, pnl, req.body.trade_id]);
-    await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [parseFloat(trade.monto_invertido) + pnl, req.user.id]);
-    await conn.end(); res.json({ mensaje: 'Posición cerrada exitosamente', pnl: pnl.toFixed(2) });
+    try {
+        const [trades] = await pool.execute('SELECT * FROM trades WHERE id = ? AND user_id = ? AND estado = "abierta"', [req.body.trade_id, req.user.id]);
+        if (trades.length === 0) return res.status(404).json({ error: 'No encontrada' });
+        
+        const trade = trades[0], precio_cierre = preciosActuales[trade.criptomoneda]?.price;
+        const varPct = (precio_cierre - trade.precio_entrada) / trade.precio_entrada;
+        let pnl = trade.tipo_operacion === 'compra_long' ? (varPct * trade.monto_invertido) : (-varPct * trade.monto_invertido);
+        
+        await pool.execute('UPDATE trades SET estado = "cerrada", precio_cierre = ?, ganancia_perdida = ? WHERE id = ?', [precio_cierre, pnl, req.body.trade_id]);
+        await pool.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [parseFloat(trade.monto_invertido) + pnl, req.user.id]);
+        res.json({ mensaje: 'Posición cerrada exitosamente', pnl: pnl.toFixed(2) });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/user/historial', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [historial] = await conn.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "cerrada" ORDER BY fecha_apertura DESC LIMIT 20', [req.user.id]);
-    const [abiertas] = await conn.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "abierta"', [req.user.id]);
-    await conn.end(); res.json({ historial, abiertas });
+    try {
+        const [historial] = await pool.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "cerrada" ORDER BY fecha_apertura DESC LIMIT 20', [req.user.id]);
+        const [abiertas] = await pool.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "abierta"', [req.user.id]);
+        res.json({ historial, abiertas });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 // --- RUTAS ADMIN ---
 app.get('/api/admin/usuarios-pendientes', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [users] = await conn.execute('SELECT * FROM users WHERE estado_cuenta = "pendiente"');
-    await conn.end(); res.json(users);
+    try {
+        const [users] = await pool.execute('SELECT * FROM users WHERE estado_cuenta = "pendiente"');
+        res.json(users);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 app.post('/api/admin/usuarios/:id/verificar', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    await conn.execute('UPDATE users SET estado_cuenta = ? WHERE id = ?', [req.body.accion, req.params.id]);
-    await conn.end(); res.json({ mensaje: `Procesado` });
+    try {
+        await pool.execute('UPDATE users SET estado_cuenta = ? WHERE id = ?', [req.body.accion, req.params.id]);
+        res.json({ mensaje: `Procesado` });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 app.get('/api/admin/transacciones', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [txs] = await conn.execute('SELECT t.*, u.nombre, u.email FROM transactions t JOIN users u ON t.user_id = u.id WHERE t.estado = "pendiente"');
-    await conn.end(); res.json(txs);
+    try {
+        const [txs] = await pool.execute('SELECT t.*, u.nombre, u.email FROM transactions t JOIN users u ON t.user_id = u.id WHERE t.estado = "pendiente"');
+        res.json(txs);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 app.post('/api/admin/transacciones/:id', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [txs] = await conn.execute('SELECT * FROM transactions WHERE id = ?', [req.params.id]);
-    if (req.body.accion === 'aprobar') {
-        await conn.execute('UPDATE transactions SET estado = "aprobada" WHERE id = ?', [txs[0].id]);
-        if (txs[0].tipo === 'recarga') await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [txs[0].monto, txs[0].user_id]);
-    } else {
-        await conn.execute('UPDATE transactions SET estado = "rechazada" WHERE id = ?', [txs[0].id]);
-        if (txs[0].tipo === 'retiro') await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [txs[0].monto, txs[0].user_id]); 
-    }
-    await conn.end(); res.json({ mensaje: `Transacción procesada` });
+    try {
+        const [txs] = await pool.execute('SELECT * FROM transactions WHERE id = ?', [req.params.id]);
+        if (req.body.accion === 'aprobar') {
+            await pool.execute('UPDATE transactions SET estado = "aprobada" WHERE id = ?', [txs[0].id]);
+            if (txs[0].tipo === 'recarga') await pool.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [txs[0].monto, txs[0].user_id]);
+        } else {
+            await pool.execute('UPDATE transactions SET estado = "rechazada" WHERE id = ?', [txs[0].id]);
+            if (txs[0].tipo === 'retiro') await pool.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [txs[0].monto, txs[0].user_id]); 
+        }
+        res.json({ mensaje: `Transacción procesada` });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/admin/recuperaciones', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [reqs] = await conn.execute('SELECT * FROM password_resets WHERE estado = "pendiente"');
-    await conn.end(); res.json(reqs);
+    try {
+        const [reqs] = await pool.execute('SELECT * FROM password_resets WHERE estado = "pendiente"');
+        res.json(reqs);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 app.post('/api/admin/recuperaciones/:id', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [reqs] = await conn.execute('SELECT * FROM password_resets WHERE id = ?', [req.params.id]);
-    if (req.body.accion === 'aprobar') {
-        await conn.execute('UPDATE password_resets SET estado = "aprobada" WHERE id = ?', [req.params.id]);
-        await conn.execute('UPDATE users SET modo_recuperacion = TRUE WHERE email = ?', [reqs[0].email]);
-    } else {
-        await conn.execute('UPDATE password_resets SET estado = "rechazada" WHERE id = ?', [req.params.id]);
-    }
-    await conn.end(); res.json({ mensaje: `Procesado` });
+    try {
+        const [reqs] = await pool.execute('SELECT * FROM password_resets WHERE id = ?', [req.params.id]);
+        if (req.body.accion === 'aprobar') {
+            await pool.execute('UPDATE password_resets SET estado = "aprobada" WHERE id = ?', [req.params.id]);
+            await pool.execute('UPDATE users SET modo_recuperacion = TRUE WHERE email = ?', [reqs[0].email]);
+        } else {
+            await pool.execute('UPDATE password_resets SET estado = "rechazada" WHERE id = ?', [req.params.id]);
+        }
+        res.json({ mensaje: `Procesado` });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/admin/bullion-manipular', async (req, res) => {
