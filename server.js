@@ -28,7 +28,7 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const JWT_SECRET = 'nomura_forex_secreto_2026';
 
-// --- AQUÍ ESTÁN TUS CREDENCIALES DE CLEVER CLOUD ---
+// --- CREDENCIALES DE CLEVER CLOUD ---
 const dbConfig = { 
     host: 'bpuud8bxkjlwplv68bgs-mysql.services.clever-cloud.com', 
     port: 3306, 
@@ -397,4 +397,6 @@ app.post('/api/admin/bullion-manipular', async (req, res) => {
     res.json({ mensaje: `Manipulando: Objetivo ${b_targetPrice.toFixed(2)}` });
 });
 
-server.listen(3000, () => console.log('🚀 Nomura Forex en puerto 3000, Conectado a la Nube!'));
+// --- LÍNEA ACTUALIZADA PARA RENDER ---
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🚀 Nomura Forex en puerto ${PORT}, Conectado a la Nube!`));
