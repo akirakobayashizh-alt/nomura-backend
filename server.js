@@ -56,6 +56,8 @@ function connectBinance() {
         io.emit('precio_actualizado', { symbol: td.s, precio: parseFloat(td.c), cambio: parseFloat(td.P) });
     });
     binanceWs.on('close', () => setTimeout(connectBinance, 5000)); 
+    // SALVAVIDAS PARA RENDER: Evita que el servidor se apague si Binance falla la conexión un segundo
+    binanceWs.on('error', (err) => console.log('Fallo menor de red con Binance, ignorando y reintentando...')); 
 }
 let preciosActuales = {};
 connectBinance();
@@ -397,6 +399,6 @@ app.post('/api/admin/bullion-manipular', async (req, res) => {
     res.json({ mensaje: `Manipulando: Objetivo ${b_targetPrice.toFixed(2)}` });
 });
 
-// --- LÍNEA ACTUALIZADA PARA RENDER ---
+// --- PUERTO DINÁMICO PARA RENDER ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`🚀 Nomura Forex en puerto ${PORT}, Conectado a la Nube!`));
