@@ -1,26 +1,37 @@
 const express = require('express');
-const mysql = require('mysql2/promise');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const { Server } = require('socket.io');
 const WebSocket = require('ws');
-const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
+
+// =========================================================
+// 1. SOLUCIÓN ANTICRASH PARA LAS FOTOS
+// Render borra las carpetas vacías. Esto la crea automáticamente.
+// =========================================================
+if (!fs.existsSync('./uploads')) {
+    fs.mkdirSync('./uploads');
+}
 
 const app = express();
-app.use(express.json());
 app.use(cors());
-
-if (!fs.existsSync('./uploads')) fs.mkdirSync('./uploads');
-app.use('/uploads', express.static('uploads'));
+app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, 'uploads/'),
-    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.fieldname + path.extname(file.originalname))
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/')
+    },
+    filename: function (req, file, cb) {
+        cb(null, Date.now() + path.extname(file.originalname))
+    }
 });
+
 const upload = multer({ storage: storage });
 
 const server = http.createServer(app);
@@ -28,14 +39,19 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const JWT_SECRET = 'nomura_forex_secreto_2026';
 
-// --- CREDENCIALES DE CLEVER CLOUD (VERSIÓN PRO) ---
-const dbConfig = { 
-    host: 'hv-par6-004.clvrcld.net', 
-    port: 11534, 
-    user: 'udpmcmp4kdbun85y', 
-    password: 'GjcaNGfXmndAB3FbskPN', 
-    database: 'b7epilwsbbgdnvz33xix' 
+// =========================================================
+// 2. CONEXIÓN PRO A CLEVER CLOUD (RUTA DIRECTA)
+// =========================================================
+const dbConfig = {
+    host: 'hv-par6-004.clvrcld.net',
+    port: 11534,
+    user: 'udpmcmp4kdbun85y',
+    password: 'GjcaNGfXmndAB3FbskPN',
+    database: 'b7epilwsbbgdnvz33xix'
 };
+
+// ¡AQUÍ ESTÁ LA LÍNEA MÁGICA QUE FALTABA PARA ENCENDER LA BASE DE DATOS!
+const pool = mysql.createPool(dbConfig);
 
 const verificarToken = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
@@ -46,7 +62,6 @@ const verificarToken = (req, res, next) => {
         next();
     });
 };
-
 // --- WEBSOCKETS BINANCE & BULLION ---
 function connectBinance() {
     const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker/ethusdt@ticker/solusdt@ticker/xrpusdt@ticker/adausdt@ticker/dogeusdt@ticker/dotusdt@ticker/maticusdt@ticker/ltcusdt@ticker/linkusdt@ticker');
