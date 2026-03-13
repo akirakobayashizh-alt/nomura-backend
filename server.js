@@ -47,7 +47,7 @@ const dbConfig = {
     port: 11534,
     user: 'udpmcmp4kdbun85y',
     password: 'GjcaNGfXmndAB3FbskPN',
-    database: 'udpmcmp4kdbun85y'
+    database: 'b7epi1wsbbgdnvz33xix'
 };
 
 const pool = mysql.createPool(dbConfig);
