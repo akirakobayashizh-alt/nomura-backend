@@ -211,22 +211,28 @@ app.get('/api/historial-grafico', async (req, res) => {
 app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'documento_identidad' }]), async (req, res) => {
     try {
         const { nombre, apellido, email, password, pais, telefono, codigo_invitacion } = req.body;
+        
+        // Protección anti-crash si Multer falla o no se envían archivos
+        if (!req.files) return res.status(400).json({ error: 'El formulario no envió archivos correctamente.' });
+
         const foto_perfil = req.files['foto_perfil'] ? '/uploads/' + req.files['foto_perfil'][0].filename : null;
         const doc = req.files['documento_identidad'] ? '/uploads/' + req.files['documento_identidad'][0].filename : null;
-        if (!nombre || !apellido || !email || !password || !doc || !pais || !telefono) return res.status(400).json({ error: 'Faltan datos obligatorios' });
+        
+        if (!nombre || !apellido || !email || !password || !doc || !pais || !telefono) {
+            return res.status(400).json({ error: 'Faltan datos obligatorios' });
+        }
 
-        const conn = await mysql.createConnection(dbConfig);
-        const [exist] = await conn.execute('SELECT * FROM users WHERE email = ?', [email]);
+        // USAMOS EL POOL: Inteligente, no se satura y se cierra solo.
+        const [exist] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
         
         const hash = await bcrypt.hash(password, 10);
 
         if (exist.length > 0) {
             if (exist[0].modo_recuperacion) {
-                await conn.execute(
+                await pool.execute(
                     'UPDATE users SET nombre=?, apellido=?, password_hash=?, foto_perfil=?, documento_identidad=?, pais=?, telefono=?, modo_recuperacion=FALSE, estado_cuenta="pendiente" WHERE email=?',
                     [nombre, apellido, hash, foto_perfil || exist[0].foto_perfil, doc, pais, telefono, email]
                 );
-                await conn.end();
                 return res.status(200).json({ mensaje: 'Cuenta recuperada exitosamente. En revisión KYC.' });
             } else {
                 return res.status(400).json({ error: 'El correo ya está registrado.' });
@@ -236,184 +242,23 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
         const mi_codigo = Math.random().toString(36).substring(2, 8).toUpperCase();
         let saldo_inicial = 0;
 
-        if(codigo_invitacion && codigo_invitacion.trim() !== '') {
-            const [refs] = await conn.execute('SELECT id FROM users WHERE mi_codigo = ?', [codigo_invitacion.trim().toUpperCase()]);
-            if(refs.length > 0) {
+        if (codigo_invitacion && codigo_invitacion.trim() !== '') {
+            const [refs] = await pool.execute('SELECT id FROM users WHERE mi_codigo = ?', [codigo_invitacion.trim().toUpperCase()]);
+            if (refs.length > 0) {
                 saldo_inicial = 10; 
-                await conn.execute('UPDATE users SET saldo_demo = saldo_demo + 10 WHERE id = ?', [refs[0].id]); 
+                await pool.execute('UPDATE users SET saldo_demo = saldo_demo + 10 WHERE id = ?', [refs[0].id]); 
             }
         }
 
-        await conn.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial]);
-        await conn.end(); res.status(201).json({ mensaje: 'Cuenta creada. En revisión KYC.' });
-    } catch (e) { res.status(500).json({ error: 'Error servidor' }); }
-});
-
-// --- LOGIN CON EXCLUSIVIDAD DE ADMIN ---
-app.post('/api/login', async (req, res) => {
-    try {
-        const conn = await mysql.createConnection(dbConfig);
-        const [users] = await conn.execute('SELECT * FROM users WHERE email = ?', [req.body.email]);
-        await conn.end();
-
-        if (users.length === 0) return res.status(401).json({ error: 'Credenciales inválidas' });
-        const user = users[0];
+        await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+            [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial]
+        );
         
-        if (user.estado_cuenta === 'pendiente') return res.status(403).json({ error: 'Cuenta en revisión KYC.' });
-        if (user.estado_cuenta === 'rechazado') return res.status(403).json({ error: 'KYC rechazado.' });
+        res.status(201).json({ mensaje: 'Cuenta creada. En revisión KYC.' });
 
-        const match = await bcrypt.compare(req.body.password, user.password_hash);
-        if (!match) return res.status(401).json({ error: 'Credenciales inválidas' });
-
-        let rolAsignado = 'user';
-        if (user.email === 'akirakobayashizh@gmail.com') {
-            rolAsignado = 'admin';
-        }
-
-        const token = jwt.sign({ id: user.id, nombre: user.nombre, rol: rolAsignado }, JWT_SECRET, { expiresIn: '8h' });
-        res.status(200).json({ token, user: { id: user.id, nombre: user.nombre, rol: rolAsignado, foto_perfil: user.foto_perfil } });
-    } catch (e) { res.status(500).json({ error: 'Error servidor' }); }
-});
-
-app.post('/api/recuperar-password', upload.single('documento_recuperacion'), async (req, res) => {
-    try {
-        const { email, telefono } = req.body;
-        const doc = req.file ? '/uploads/' + req.file.filename : null;
-        if (!email || !telefono || !doc) return res.status(400).json({ error: 'Faltan datos' });
-
-        const conn = await mysql.createConnection(dbConfig);
-        const [exist] = await conn.execute('SELECT * FROM users WHERE email = ?', [email]);
-        if (exist.length === 0) return res.status(400).json({ error: 'El correo no existe en el sistema' });
-
-        await conn.execute('INSERT INTO password_resets (email, telefono, documento_identidad) VALUES (?, ?, ?)', [email, telefono, doc]);
-        await conn.end();
-        res.json({ mensaje: 'Solicitud enviada al Administrador. Espere aprobación.' });
-    } catch (e) { res.status(500).json({ error: 'Error al solicitar recuperación' }); }
-});
-
-app.get('/api/user/perfil', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [users] = await conn.execute('SELECT nombre, saldo_demo, mi_codigo FROM users WHERE id = ?', [req.user.id]);
-    await conn.end(); res.json(users[0]);
-});
-
-app.post('/api/user/recarga', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    await conn.execute('INSERT INTO transactions (user_id, tipo, monto) VALUES (?, "recarga", ?)', [req.user.id, req.body.monto]);
-    await conn.end(); res.json({ mensaje: 'Solicitud enviada.' });
-});
-
-app.post('/api/user/retiro', verificarToken, upload.single('documento_retiro'), async (req, res) => {
-    try {
-        const { monto, billetera } = req.body;
-        const doc = req.file ? '/uploads/' + req.file.filename : null;
-        if (!monto || monto <= 0 || !billetera || !doc) return res.status(400).json({ error: 'Datos incompletos' });
-
-        const conn = await mysql.createConnection(dbConfig);
-        const [users] = await conn.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
-        if (users[0].saldo_demo < monto) return res.status(400).json({ error: 'Saldo insuficiente' });
-
-        await conn.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto, req.user.id]); 
-        await conn.execute('INSERT INTO transactions (user_id, tipo, monto, billetera_retiro, documento_retiro) VALUES (?, "retiro", ?, ?, ?)', [req.user.id, monto, billetera, doc]);
-        await conn.end();
-        res.json({ mensaje: 'Solicitud de retiro en proceso.' });
-    } catch (e) { res.status(500).json({ error: 'Error al procesar retiro' }); }
-});
-
-app.post('/api/trade/abrir', verificarToken, async (req, res) => {
-    const { criptomoneda, tipo_operacion, monto_invertido, tp, sl } = req.body;
-    const precio_entrada = preciosActuales[criptomoneda]?.price;
-    if (!precio_entrada) return res.status(400).json({ error: 'Precio no disponible' });
-
-    const conn = await mysql.createConnection(dbConfig);
-    const [users] = await conn.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
-    if (users[0].saldo_demo < monto_invertido) return res.status(400).json({ error: 'Saldo insuficiente' });
-
-    await conn.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto_invertido, req.user.id]);
-    const [result] = await conn.execute(
-        'INSERT INTO trades (user_id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp, sl) VALUES (?, ?, ?, ?, ?, ?, ?)', 
-        [req.user.id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp || null, sl || null]
-    );
-    await conn.end(); res.json({ mensaje: 'Orden abierta', trade_id: result.insertId, precio_entrada });
-});
-
-app.post('/api/trade/cerrar', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [trades] = await conn.execute('SELECT * FROM trades WHERE id = ? AND user_id = ? AND estado = "abierta"', [req.body.trade_id, req.user.id]);
-    if (trades.length === 0) return res.status(404).json({ error: 'No encontrada' });
-    
-    const trade = trades[0], precio_cierre = preciosActuales[trade.criptomoneda]?.price;
-    const varPct = (precio_cierre - trade.precio_entrada) / trade.precio_entrada;
-    let pnl = trade.tipo_operacion === 'compra_long' ? (varPct * trade.monto_invertido) : (-varPct * trade.monto_invertido);
-    
-    await conn.execute('UPDATE trades SET estado = "cerrada", precio_cierre = ?, ganancia_perdida = ? WHERE id = ?', [precio_cierre, pnl, req.body.trade_id]);
-    await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [parseFloat(trade.monto_invertido) + pnl, req.user.id]);
-    await conn.end(); res.json({ mensaje: 'Posición cerrada exitosamente', pnl: pnl.toFixed(2) });
-});
-
-app.get('/api/user/historial', verificarToken, async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [historial] = await conn.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "cerrada" ORDER BY fecha_apertura DESC LIMIT 20', [req.user.id]);
-    const [abiertas] = await conn.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "abierta"', [req.user.id]);
-    await conn.end(); res.json({ historial, abiertas });
-});
-
-// --- RUTAS ADMIN ---
-app.get('/api/admin/usuarios-pendientes', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [users] = await conn.execute('SELECT * FROM users WHERE estado_cuenta = "pendiente"');
-    await conn.end(); res.json(users);
-});
-app.post('/api/admin/usuarios/:id/verificar', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    await conn.execute('UPDATE users SET estado_cuenta = ? WHERE id = ?', [req.body.accion, req.params.id]);
-    await conn.end(); res.json({ mensaje: `Procesado` });
-});
-app.get('/api/admin/transacciones', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [txs] = await conn.execute('SELECT t.*, u.nombre, u.email FROM transactions t JOIN users u ON t.user_id = u.id WHERE t.estado = "pendiente"');
-    await conn.end(); res.json(txs);
-});
-app.post('/api/admin/transacciones/:id', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [txs] = await conn.execute('SELECT * FROM transactions WHERE id = ?', [req.params.id]);
-    if (req.body.accion === 'aprobar') {
-        await conn.execute('UPDATE transactions SET estado = "aprobada" WHERE id = ?', [txs[0].id]);
-        if (txs[0].tipo === 'recarga') await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [txs[0].monto, txs[0].user_id]);
-    } else {
-        await conn.execute('UPDATE transactions SET estado = "rechazada" WHERE id = ?', [txs[0].id]);
-        if (txs[0].tipo === 'retiro') await conn.execute('UPDATE users SET saldo_demo = saldo_demo + ? WHERE id = ?', [txs[0].monto, txs[0].user_id]); 
+    } catch (e) { 
+        // ¡QUITAMOS LA MORDAZA! Si algo falla, Render gritará y el panel de Red te dirá el porqué exacto.
+        console.error("🔥 ERROR GRAVE EN REGISTRO:", e);
+        res.status(500).json({ error: e.message }); 
     }
-    await conn.end(); res.json({ mensaje: `Transacción procesada` });
 });
-
-app.get('/api/admin/recuperaciones', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [reqs] = await conn.execute('SELECT * FROM password_resets WHERE estado = "pendiente"');
-    await conn.end(); res.json(reqs);
-});
-app.post('/api/admin/recuperaciones/:id', async (req, res) => {
-    const conn = await mysql.createConnection(dbConfig);
-    const [reqs] = await conn.execute('SELECT * FROM password_resets WHERE id = ?', [req.params.id]);
-    if (req.body.accion === 'aprobar') {
-        await conn.execute('UPDATE password_resets SET estado = "aprobada" WHERE id = ?', [req.params.id]);
-        await conn.execute('UPDATE users SET modo_recuperacion = TRUE WHERE email = ?', [reqs[0].email]);
-    } else {
-        await conn.execute('UPDATE password_resets SET estado = "rechazada" WHERE id = ?', [req.params.id]);
-    }
-    await conn.end(); res.json({ mensaje: `Procesado` });
-});
-
-app.post('/api/admin/bullion-manipular', async (req, res) => {
-    const { porcentaje, minutos } = req.body;
-    if (porcentaje === 0) { b_targetPrice = null; return res.json({ mensaje: 'Automático' }); }
-    const aumento = bullionPrice * (porcentaje / 100);
-    b_targetPrice = bullionPrice + aumento;
-    b_step = aumento / ((minutos * 60) / 2);
-    b_endTime = Date.now() + (minutos * 60 * 1000);
-    res.json({ mensaje: `Manipulando: Objetivo ${b_targetPrice.toFixed(2)}` });
-});
-
-// --- PUERTO DINÁMICO PARA RENDER ---
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Nomura Forex en puerto ${PORT}, Conectado a la Nube!`));
