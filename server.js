@@ -73,7 +73,7 @@ async function cargarPrecioBullion() {
 }
 cargarPrecioBullion();
 
-// EMISOR EN VIVO (CADA 2 SEGUNDOS)
+// EMISOR EN VIVO (Mueve el precio en pantalla rápido)
 setInterval(async () => {
     let now = Date.now();
     if (b_targetPrice && now < b_endTime) bullionPrice += b_step;
@@ -88,12 +88,19 @@ setInterval(async () => {
     io.emit('precio_actualizado', { symbol: 'BULLIONUSDT', precio: bullionPrice, cambio: 0 });
 }, 2000);
 
-// GUARDADO EN BASE DE DATOS (CADA 15 MINUTOS - 900,000 ms)
+// 🔥 GUARDADO INTERNO AUTOMÁTICO EXACTAMENTE CADA 15 MINUTOS (Independiente de los usuarios)
 setInterval(async () => {
-    try {
-        await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
-    } catch (e) { console.error("Error guardando historial:", e); }
-}, 900000);
+    let ahora = new Date();
+    // Verifica si el reloj de la computadora del servidor está en los minutos 0, 15, 30 o 45 y en el segundo 0
+    if (ahora.getMinutes() % 15 === 0 && ahora.getSeconds() === 0) {
+        try {
+            await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
+            console.log(`Bullion guardado automáticamente: ${bullionPrice}`);
+        } catch (e) {
+            console.error("Error guardando historial:", e);
+        }
+    }
+}, 1000); // El reloj interno hace "tic tac" cada segundo buscando el momento exacto
 
 setInterval(async () => {
     try {
@@ -168,8 +175,15 @@ app.get('/api/historial-grafico', async (req, res) => {
     
     if (symbol === 'BULLIONUSDT') {
         try {
-            const [rows] = await pool.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY fecha ASC LIMIT 1000');
-            return res.json(rows);
+            // Traemos los puntos de 15 minutos guardados
+            const [rows] = await pool.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY id DESC LIMIT 1000');
+            let result = rows.map(r => ({ time: r.time, value: parseFloat(r.value) })).reverse();
+            
+            // Le adjuntamos el precio vivo como la última vela en movimiento
+            let now15m = Math.floor(Date.now() / 1000 / 900) * 900;
+            result.push({ time: now15m, value: bullionPrice });
+            
+            return res.json(result);
         } catch (e) { return res.status(500).json({ error: 'Error DB' }); }
     }
     
