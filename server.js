@@ -10,10 +10,6 @@ const http = require('http');
 const { Server } = require('socket.io');
 const WebSocket = require('ws');
 
-// =========================================================
-// 1. SOLUCIÓN ANTICRASH PARA LAS FOTOS
-// Render borra las carpetas vacías. Esto la crea automáticamente.
-// =========================================================
 if (!fs.existsSync('./uploads')) {
     fs.mkdirSync('./uploads');
 }
@@ -24,14 +20,9 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, 'uploads/')
-    },
-    filename: function (req, file, cb) {
-        cb(null, Date.now() + path.extname(file.originalname))
-    }
+    destination: function (req, file, cb) { cb(null, 'uploads/') },
+    filename: function (req, file, cb) { cb(null, Date.now() + path.extname(file.originalname)) }
 });
-
 const upload = multer({ storage: storage });
 
 const server = http.createServer(app);
@@ -39,9 +30,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const JWT_SECRET = 'nomura_forex_secreto_2026';
 
-// =========================================================
-// 2. CONEXIÓN PRO A CLEVER CLOUD (RUTA DIRECTA Y POOL)
-// =========================================================
 const dbConfig = {
     host: 'hv-par6-004.clvrcld.net',
     port: 11534,
@@ -50,7 +38,6 @@ const dbConfig = {
     database: 'b7epi1wsbbgdnvz33xix'
 };
 
-// POOL GENERAL (Conexiones ultrarrápidas y seguras)
 const pool = mysql.createPool(dbConfig);
 
 const verificarToken = (req, res, next) => {
@@ -63,7 +50,6 @@ const verificarToken = (req, res, next) => {
     });
 };
 
-// --- WEBSOCKETS BINANCE & BULLION ---
 function connectBinance() {
     const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker/ethusdt@ticker/solusdt@ticker/xrpusdt@ticker/adausdt@ticker/dogeusdt@ticker/dotusdt@ticker/maticusdt@ticker/ltcusdt@ticker/linkusdt@ticker');
     binanceWs.on('message', (data) => {
@@ -72,7 +58,7 @@ function connectBinance() {
         io.emit('precio_actualizado', { symbol: td.s, precio: parseFloat(td.c), cambio: parseFloat(td.P) });
     });
     binanceWs.on('close', () => setTimeout(connectBinance, 5000)); 
-    binanceWs.on('error', (err) => console.log('Fallo menor de red con Binance, ignorando y reintentando...')); 
+    binanceWs.on('error', (err) => console.log('Fallo menor de red Binance...')); 
 }
 let preciosActuales = {};
 connectBinance();
@@ -83,11 +69,11 @@ async function cargarPrecioBullion() {
         const [rows] = await pool.execute('SELECT precio FROM bullion_history ORDER BY id DESC LIMIT 1');
         if (rows.length > 0) bullionPrice = parseFloat(rows[0].precio);
         preciosActuales['BULLIONUSDT'] = { price: bullionPrice, change: 0 };
-    } catch (e) { console.error("Aviso: Aún no hay historial de Bullion."); }
+    } catch (e) {}
 }
 cargarPrecioBullion();
 
-// 🔥 MOTOR DE BULLION (GUARDADO CADA 2 SEGUNDOS EXACTOS SIN LIMITES)
+// EMISOR EN VIVO (CADA 2 SEGUNDOS)
 setInterval(async () => {
     let now = Date.now();
     if (b_targetPrice && now < b_endTime) bullionPrice += b_step;
@@ -100,15 +86,15 @@ setInterval(async () => {
     }
     preciosActuales['BULLIONUSDT'] = { price: bullionPrice, change: 0 };
     io.emit('precio_actualizado', { symbol: 'BULLIONUSDT', precio: bullionPrice, cambio: 0 });
-
-    try {
-        await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
-    } catch (e) {
-        console.error("Error guardando historial:", e);
-    }
 }, 2000);
 
-// --- VIGILANTE DE TP Y SL ---
+// GUARDADO EN BASE DE DATOS (CADA 15 MINUTOS - 900,000 ms)
+setInterval(async () => {
+    try {
+        await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
+    } catch (e) { console.error("Error guardando historial:", e); }
+}, 900000);
+
 setInterval(async () => {
     try {
         const [abiertas] = await pool.execute('SELECT * FROM trades WHERE estado = "abierta"');
@@ -138,7 +124,6 @@ setInterval(async () => {
     } catch (e) {}
 }, 2000); 
 
-// --- CHAT PRIVADO WEBSOCKET ---
 io.on('connection', (socket) => {
     socket.on('mensaje_usuario', async (data) => {
         try {
@@ -178,20 +163,14 @@ app.get('/api/admin/chat/historial/:id', async (req, res) => {
     } catch(e) { res.status(500).json({error: 'Error'}); }
 });
 
-// =========================================================
-// RUTA HISTORIAL GRAFICO (RESTAURADA PARA TIEMPO REAL)
-// =========================================================
 app.get('/api/historial-grafico', async (req, res) => {
     const { symbol, interval } = req.query;
     
     if (symbol === 'BULLIONUSDT') {
         try {
-            // Leemos directo de la BD, que ahora siempre tiene el precio de este mismo milisegundo
             const [rows] = await pool.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY fecha ASC LIMIT 1000');
             return res.json(rows);
-        } catch (e) { 
-            return res.status(500).json({ error: 'Error DB' }); 
-        }
+        } catch (e) { return res.status(500).json({ error: 'Error DB' }); }
     }
     
     try {
@@ -199,27 +178,20 @@ app.get('/api/historial-grafico', async (req, res) => {
         const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
         const data = await response.json();
         res.json(data.map(d => ({ time: d[0] / 1000, value: parseFloat(d[4]) })));
-    } catch (error) { 
-        res.status(500).json({ error: 'Error Binance' }); 
-    }
+    } catch (error) { res.status(500).json({ error: 'Error Binance' }); }
 });
 
-// --- SISTEMA DE REGISTRO Y RECUPERACIÓN ---
 app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'documento_identidad' }]), async (req, res) => {
     try {
         const { nombre, apellido, email, password, pais, telefono, codigo_invitacion } = req.body;
-        
         if (!req.files) return res.status(400).json({ error: 'El formulario no envió archivos correctamente.' });
 
         const foto_perfil = req.files['foto_perfil'] ? '/uploads/' + req.files['foto_perfil'][0].filename : null;
         const doc = req.files['documento_identidad'] ? '/uploads/' + req.files['documento_identidad'][0].filename : null;
         
-        if (!nombre || !apellido || !email || !password || !doc || !pais || !telefono) {
-            return res.status(400).json({ error: 'Faltan datos obligatorios' });
-        }
+        if (!nombre || !apellido || !email || !password || !doc || !pais || !telefono) return res.status(400).json({ error: 'Faltan datos obligatorios' });
 
         const [exist] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
-        
         const hash = await bcrypt.hash(password, 10);
 
         if (exist.length > 0) {
@@ -248,20 +220,13 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
         await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
             [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial]
         );
-        
         res.status(201).json({ mensaje: 'Cuenta creada. En revisión KYC.' });
-
-    } catch (e) { 
-        console.error("🔥 ERROR GRAVE EN REGISTRO:", e);
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- LOGIN CON EXCLUSIVIDAD DE ADMIN ---
 app.post('/api/login', async (req, res) => {
     try {
         const [users] = await pool.execute('SELECT * FROM users WHERE email = ?', [req.body.email]);
-
         if (users.length === 0) return res.status(401).json({ error: 'Credenciales inválidas' });
         const user = users[0];
         
@@ -271,11 +236,7 @@ app.post('/api/login', async (req, res) => {
         const match = await bcrypt.compare(req.body.password, user.password_hash);
         if (!match) return res.status(401).json({ error: 'Credenciales inválidas' });
 
-        let rolAsignado = 'user';
-        if (user.email === 'akirakobayashizh@gmail.com') {
-            rolAsignado = 'admin';
-        }
-
+        let rolAsignado = user.email === 'akirakobayashizh@gmail.com' ? 'admin' : 'user';
         const token = jwt.sign({ id: user.id, nombre: user.nombre, rol: rolAsignado }, JWT_SECRET, { expiresIn: '8h' });
         res.status(200).json({ token, user: { id: user.id, nombre: user.nombre, rol: rolAsignado, foto_perfil: user.foto_perfil } });
     } catch (e) { res.status(500).json({ error: 'Error servidor' }); }
@@ -365,7 +326,6 @@ app.get('/api/user/historial', verificarToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// --- RUTAS ADMIN ---
 app.get('/api/admin/usuarios-pendientes', async (req, res) => {
     try {
         const [users] = await pool.execute('SELECT * FROM users WHERE estado_cuenta = "pendiente"');
@@ -427,6 +387,5 @@ app.post('/api/admin/bullion-manipular', async (req, res) => {
     res.json({ mensaje: `Manipulando: Objetivo ${b_targetPrice.toFixed(2)}` });
 });
 
-// --- PUERTO DINÁMICO PARA RENDER ---
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => console.log(`🚀 Nomura Forex en puerto ${PORT}, Conectado a la Nube!`));
