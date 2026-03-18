@@ -41,6 +41,8 @@ const dbConfig = {
 
 const pool = mysql.createPool(dbConfig);
 
+const generateRandomId = () => Math.floor(Math.random() * 900000000) + 100000000;
+
 // =========================================================
 // 🔥 CONFIGURACIÓN DE CORREOS (NODEMAILER)
 // =========================================================
@@ -48,7 +50,7 @@ const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
         user: 'akirakobayashizh@gmail.com',
-        pass: 'TU_CONTRASEÑA_AMARILLA_AQUI' // <-- RECUERDA PONER TU CLAVE DE GOOGLE AQUÍ
+        pass: 'TU_CONTRASEÑA_AMARILLA_AQUI' // <-- PON TU CLAVE DE GOOGLE AQUÍ
     }
 });
 
@@ -207,12 +209,14 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
         const hash = await bcrypt.hash(password, 10);
         
         const codigo_verificacion = Math.floor(100000 + Math.random() * 900000).toString();
+        // 🔥 NUEVO: CÓDIGO DE USUARIO DE 6 DÍGITOS
+        const uid_visible = exist.length > 0 && exist[0].uid_visible ? exist[0].uid_visible : Math.floor(100000 + Math.random() * 900000).toString();
 
         if (exist.length > 0) {
             if (exist[0].modo_recuperacion) {
                 await pool.execute(
-                    'UPDATE users SET nombre=?, apellido=?, password_hash=?, foto_perfil=?, documento_identidad=?, pais=?, telefono=?, modo_recuperacion=FALSE, estado_cuenta="sin_verificar", codigo_verificacion=? WHERE email=?',
-                    [nombre, apellido, hash, foto_perfil || exist[0].foto_perfil, doc, pais, telefono, codigo_verificacion, email]
+                    'UPDATE users SET nombre=?, apellido=?, password_hash=?, foto_perfil=?, documento_identidad=?, pais=?, telefono=?, modo_recuperacion=FALSE, estado_cuenta="sin_verificar", codigo_verificacion=?, uid_visible=? WHERE email=?',
+                    [nombre, apellido, hash, foto_perfil || exist[0].foto_perfil, doc, pais, telefono, codigo_verificacion, uid_visible, email]
                 );
             } else {
                 return res.status(400).json({ error: 'El correo ya está registrado.' });
@@ -229,8 +233,9 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
                 }
             }
 
-            await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo, codigo_verificacion, estado_cuenta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "sin_verificar")', 
-                [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial, codigo_verificacion]
+            // Se inserta el uid_visible
+            await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo, codigo_verificacion, estado_cuenta, uid_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "sin_verificar", ?)', 
+                [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial, codigo_verificacion, uid_visible]
             );
         }
 
@@ -304,13 +309,10 @@ app.post('/api/recuperar-password', upload.single('documento_recuperacion'), asy
     } catch (e) { res.status(500).json({ error: 'Error al solicitar recuperación' }); }
 });
 
-// =========================================================
-// 🔥 RUTAS DE PERFIL, TRANSACCIONES Y FOTOS (CORREGIDAS)
-// =========================================================
+// 🔥 SE AGREGA uid_visible A LA CONSULTA DEL PERFIL
 app.get('/api/user/perfil', verificarToken, async (req, res) => {
     try {
-        // Ahora trae TODOS los datos para armar el panel de user.html
-        const [users] = await pool.execute('SELECT id, nombre, apellido, email, pais, telefono, foto_perfil, saldo_demo, mi_codigo, estado_cuenta FROM users WHERE id = ?', [req.user.id]);
+        const [users] = await pool.execute('SELECT id, uid_visible, nombre, apellido, email, pais, telefono, foto_perfil, saldo_demo, mi_codigo, estado_cuenta FROM users WHERE id = ?', [req.user.id]);
         res.json(users[0]);
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
@@ -333,8 +335,9 @@ app.post('/api/user/actualizar-foto', verificarToken, upload.single('foto_perfil
 
 app.post('/api/user/recarga', verificarToken, async (req, res) => {
     try {
-        await pool.execute('INSERT INTO transactions (user_id, tipo, monto) VALUES (?, "recarga", ?)', [req.user.id, req.body.monto]);
-        res.json({ mensaje: 'Solicitud enviada.' });
+        const transId = generateRandomId();
+        await pool.execute('INSERT INTO transactions (user_id, tipo, monto, trans_id) VALUES (?, "recarga", ?, ?)', [req.user.id, req.body.monto, transId]);
+        res.json({ mensaje: 'Solicitud enviada.', trans_id: transId });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
@@ -347,27 +350,33 @@ app.post('/api/user/retiro', verificarToken, upload.single('documento_retiro'), 
         const [users] = await pool.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
         if (users[0].saldo_demo < monto) return res.status(400).json({ error: 'Saldo insuficiente' });
 
+        const transId = generateRandomId();
+
         await pool.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto, req.user.id]); 
-        await pool.execute('INSERT INTO transactions (user_id, tipo, monto, billetera_retiro, documento_retiro) VALUES (?, "retiro", ?, ?, ?)', [req.user.id, monto, billetera, doc]);
-        res.json({ mensaje: 'Solicitud de retiro en proceso.' });
+        await pool.execute('INSERT INTO transactions (user_id, tipo, monto, billetera_retiro, documento_retiro, trans_id) VALUES (?, "retiro", ?, ?, ?, ?)', [req.user.id, monto, billetera, doc, transId]);
+        res.json({ mensaje: 'Solicitud de retiro en proceso.', trans_id: transId });
     } catch (e) { res.status(500).json({ error: 'Error al procesar retiro' }); }
 });
 
 app.post('/api/trade/abrir', verificarToken, async (req, res) => {
     try {
         const { criptomoneda, tipo_operacion, monto_invertido, tp, sl } = req.body;
+        if(monto_invertido < 10) return res.status(400).json({ error: 'El monto mínimo de operación es 10 USDT.' });
+        
         const precio_entrada = preciosActuales[criptomoneda]?.price;
         if (!precio_entrada) return res.status(400).json({ error: 'Precio no disponible' });
 
         const [users] = await pool.execute('SELECT saldo_demo FROM users WHERE id = ?', [req.user.id]);
         if (users[0].saldo_demo < monto_invertido) return res.status(400).json({ error: 'Saldo insuficiente' });
 
+        const tradeCode = generateRandomId();
+
         await pool.execute('UPDATE users SET saldo_demo = saldo_demo - ? WHERE id = ?', [monto_invertido, req.user.id]);
         const [result] = await pool.execute(
-            'INSERT INTO trades (user_id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp, sl) VALUES (?, ?, ?, ?, ?, ?, ?)', 
-            [req.user.id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp || null, sl || null]
+            'INSERT INTO trades (user_id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp, sl, trade_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', 
+            [req.user.id, criptomoneda, tipo_operacion, precio_entrada, monto_invertido, tp || null, sl || null, tradeCode]
         );
-        res.json({ mensaje: 'Orden abierta', trade_id: result.insertId, precio_entrada });
+        res.json({ mensaje: 'Orden abierta', trade_id: result.insertId, precio_entrada, trade_code: tradeCode });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
@@ -392,6 +401,14 @@ app.get('/api/user/historial', verificarToken, async (req, res) => {
         const [abiertas] = await pool.execute('SELECT * FROM trades WHERE user_id = ? AND estado = "abierta"', [req.user.id]);
         res.json({ historial, abiertas });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+app.get('/api/trade/detalles/:code', verificarToken, async (req, res) => {
+    try {
+        const [trades] = await pool.execute('SELECT * FROM trades WHERE trade_code = ? AND user_id = ?', [req.params.code, req.user.id]);
+        if(trades.length === 0) return res.status(404).json({ error: 'Trade no encontrado.' });
+        res.json(trades[0]);
+    } catch(e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/admin/usuarios-pendientes', async (req, res) => {
