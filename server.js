@@ -9,7 +9,7 @@ const fs = require('fs');
 const http = require('http');
 const { Server } = require('socket.io');
 const WebSocket = require('ws');
-const nodemailer = require('nodemailer'); // <-- EL NUEVO CARTERO
+const nodemailer = require('nodemailer');
 
 if (!fs.existsSync('./uploads')) {
     fs.mkdirSync('./uploads');
@@ -48,7 +48,7 @@ const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
         user: 'akirakobayashizh@gmail.com',
-        pass: 'TU_CONTRASEÑA_AMARILLA_AQUI' // <-- ¡PEGA TU CONTRASEÑA DE GOOGLE AQUÍ!
+        pass: 'TU_CONTRASEÑA_AMARILLA_AQUI' // <-- RECUERDA PONER TU CLAVE DE GOOGLE AQUÍ
     }
 });
 
@@ -193,9 +193,6 @@ app.get('/api/historial-grafico', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error Binance' }); }
 });
 
-// =========================================================
-// 🔥 NUEVO REGISTRO (CON ENVÍO DE CÓDIGO)
-// =========================================================
 app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'documento_identidad' }]), async (req, res) => {
     try {
         const { nombre, apellido, email, password, pais, telefono, codigo_invitacion } = req.body;
@@ -209,7 +206,6 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
         const [exist] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
         const hash = await bcrypt.hash(password, 10);
         
-        // Generar Código de Verificación
         const codigo_verificacion = Math.floor(100000 + Math.random() * 900000).toString();
 
         if (exist.length > 0) {
@@ -238,7 +234,6 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
             );
         }
 
-        // ENVIAR EL CORREO
         try {
             await transporter.sendMail({
                 from: '"Nomura Forex" <akirakobayashizh@gmail.com>',
@@ -254,16 +249,13 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
                 `
             });
         } catch (mailErr) {
-            console.log('Error enviando correo, pero el registro se guardó', mailErr);
+            console.log('Error enviando correo', mailErr);
         }
 
         res.status(201).json({ mensaje: 'Revisa tu correo para ingresar el código de verificación.' });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// =========================================================
-// 🔥 NUEVA RUTA PARA VERIFICAR EL CORREO
-// =========================================================
 app.post('/api/verificar-correo', async (req, res) => {
     try {
         const { email, codigo } = req.body;
@@ -298,7 +290,6 @@ app.post('/api/login', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error servidor' }); }
 });
 
-// ... (El resto de las rutas siguen intactas) ...
 app.post('/api/recuperar-password', upload.single('documento_recuperacion'), async (req, res) => {
     try {
         const { email, telefono } = req.body;
@@ -313,11 +304,31 @@ app.post('/api/recuperar-password', upload.single('documento_recuperacion'), asy
     } catch (e) { res.status(500).json({ error: 'Error al solicitar recuperación' }); }
 });
 
+// =========================================================
+// 🔥 RUTAS DE PERFIL, TRANSACCIONES Y FOTOS (CORREGIDAS)
+// =========================================================
 app.get('/api/user/perfil', verificarToken, async (req, res) => {
     try {
-        const [users] = await pool.execute('SELECT nombre, saldo_demo, mi_codigo FROM users WHERE id = ?', [req.user.id]);
+        // Ahora trae TODOS los datos para armar el panel de user.html
+        const [users] = await pool.execute('SELECT id, nombre, apellido, email, pais, telefono, foto_perfil, saldo_demo, mi_codigo, estado_cuenta FROM users WHERE id = ?', [req.user.id]);
         res.json(users[0]);
     } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+app.get('/api/user/transacciones', verificarToken, async (req, res) => {
+    try {
+        const [txs] = await pool.execute('SELECT * FROM transactions WHERE user_id = ? ORDER BY fecha_solicitud DESC', [req.user.id]);
+        res.json(txs);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+app.post('/api/user/actualizar-foto', verificarToken, upload.single('foto_perfil'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'No se subió imagen' });
+        const foto_perfil = '/uploads/' + req.file.filename;
+        await pool.execute('UPDATE users SET foto_perfil = ? WHERE id = ?', [foto_perfil, req.user.id]);
+        res.json({ mensaje: 'Foto actualizada', foto_perfil });
+    } catch (e) { res.status(500).json({ error: 'Error al actualizar' }); }
 });
 
 app.post('/api/user/recarga', verificarToken, async (req, res) => {
