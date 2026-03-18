@@ -50,7 +50,7 @@ const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
         user: 'akirakobayashizh@gmail.com',
-        pass: 'TU_CONTRASEÑA_AMARILLA_AQUI' // <-- PON TU CLAVE DE GOOGLE AQUÍ
+        pass: 'mgcd vsax zwqg pdzx' // <-- PON TU CLAVE DE GOOGLE AQUÍ
     }
 });
 
