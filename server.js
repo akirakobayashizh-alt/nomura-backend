@@ -9,6 +9,7 @@ const fs = require('fs');
 const http = require('http');
 const { Server } = require('socket.io');
 const WebSocket = require('ws');
+const nodemailer = require('nodemailer'); // <-- EL NUEVO CARTERO
 
 if (!fs.existsSync('./uploads')) {
     fs.mkdirSync('./uploads');
@@ -39,6 +40,17 @@ const dbConfig = {
 };
 
 const pool = mysql.createPool(dbConfig);
+
+// =========================================================
+// 🔥 CONFIGURACIÓN DE CORREOS (NODEMAILER)
+// =========================================================
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: 'akirakobayashizh@gmail.com',
+        pass: 'TU_CONTRASEÑA_AMARILLA_AQUI' // <-- ¡PEGA TU CONTRASEÑA DE GOOGLE AQUÍ!
+    }
+});
 
 const verificarToken = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
@@ -73,7 +85,6 @@ async function cargarPrecioBullion() {
 }
 cargarPrecioBullion();
 
-// EMISOR EN VIVO (Mueve el precio en pantalla rápido)
 setInterval(async () => {
     let now = Date.now();
     if (b_targetPrice && now < b_endTime) bullionPrice += b_step;
@@ -88,19 +99,12 @@ setInterval(async () => {
     io.emit('precio_actualizado', { symbol: 'BULLIONUSDT', precio: bullionPrice, cambio: 0 });
 }, 2000);
 
-// 🔥 GUARDADO INTERNO AUTOMÁTICO EXACTAMENTE CADA 15 MINUTOS (Independiente de los usuarios)
 setInterval(async () => {
     let ahora = new Date();
-    // Verifica si el reloj de la computadora del servidor está en los minutos 0, 15, 30 o 45 y en el segundo 0
     if (ahora.getMinutes() % 15 === 0 && ahora.getSeconds() === 0) {
-        try {
-            await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]);
-            console.log(`Bullion guardado automáticamente: ${bullionPrice}`);
-        } catch (e) {
-            console.error("Error guardando historial:", e);
-        }
+        try { await pool.execute('INSERT INTO bullion_history (precio) VALUES (?)', [bullionPrice]); } catch (e) {}
     }
-}, 1000); // El reloj interno hace "tic tac" cada segundo buscando el momento exacto
+}, 1000);
 
 setInterval(async () => {
     try {
@@ -172,21 +176,15 @@ app.get('/api/admin/chat/historial/:id', async (req, res) => {
 
 app.get('/api/historial-grafico', async (req, res) => {
     const { symbol, interval } = req.query;
-    
     if (symbol === 'BULLIONUSDT') {
         try {
-            // Traemos los puntos de 15 minutos guardados
             const [rows] = await pool.execute('SELECT UNIX_TIMESTAMP(fecha) as time, precio as value FROM bullion_history ORDER BY id DESC LIMIT 1000');
             let result = rows.map(r => ({ time: r.time, value: parseFloat(r.value) })).reverse();
-            
-            // Le adjuntamos el precio vivo como la última vela en movimiento
             let now15m = Math.floor(Date.now() / 1000 / 900) * 900;
             result.push({ time: now15m, value: bullionPrice });
-            
             return res.json(result);
         } catch (e) { return res.status(500).json({ error: 'Error DB' }); }
     }
-    
     try {
         let limit = 1000;
         const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
@@ -195,6 +193,9 @@ app.get('/api/historial-grafico', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error Binance' }); }
 });
 
+// =========================================================
+// 🔥 NUEVO REGISTRO (CON ENVÍO DE CÓDIGO)
+// =========================================================
 app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'documento_identidad' }]), async (req, res) => {
     try {
         const { nombre, apellido, email, password, pais, telefono, codigo_invitacion } = req.body;
@@ -207,35 +208,75 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
 
         const [exist] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
         const hash = await bcrypt.hash(password, 10);
+        
+        // Generar Código de Verificación
+        const codigo_verificacion = Math.floor(100000 + Math.random() * 900000).toString();
 
         if (exist.length > 0) {
             if (exist[0].modo_recuperacion) {
                 await pool.execute(
-                    'UPDATE users SET nombre=?, apellido=?, password_hash=?, foto_perfil=?, documento_identidad=?, pais=?, telefono=?, modo_recuperacion=FALSE, estado_cuenta="pendiente" WHERE email=?',
-                    [nombre, apellido, hash, foto_perfil || exist[0].foto_perfil, doc, pais, telefono, email]
+                    'UPDATE users SET nombre=?, apellido=?, password_hash=?, foto_perfil=?, documento_identidad=?, pais=?, telefono=?, modo_recuperacion=FALSE, estado_cuenta="sin_verificar", codigo_verificacion=? WHERE email=?',
+                    [nombre, apellido, hash, foto_perfil || exist[0].foto_perfil, doc, pais, telefono, codigo_verificacion, email]
                 );
-                return res.status(200).json({ mensaje: 'Cuenta recuperada exitosamente. En revisión KYC.' });
             } else {
                 return res.status(400).json({ error: 'El correo ya está registrado.' });
             }
-        }
+        } else {
+            const mi_codigo = Math.random().toString(36).substring(2, 8).toUpperCase();
+            let saldo_inicial = 0;
 
-        const mi_codigo = Math.random().toString(36).substring(2, 8).toUpperCase();
-        let saldo_inicial = 0;
-
-        if (codigo_invitacion && codigo_invitacion.trim() !== '') {
-            const [refs] = await pool.execute('SELECT id FROM users WHERE mi_codigo = ?', [codigo_invitacion.trim().toUpperCase()]);
-            if (refs.length > 0) {
-                saldo_inicial = 10; 
-                await pool.execute('UPDATE users SET saldo_demo = saldo_demo + 10 WHERE id = ?', [refs[0].id]); 
+            if (codigo_invitacion && codigo_invitacion.trim() !== '') {
+                const [refs] = await pool.execute('SELECT id FROM users WHERE mi_codigo = ?', [codigo_invitacion.trim().toUpperCase()]);
+                if (refs.length > 0) {
+                    saldo_inicial = 10; 
+                    await pool.execute('UPDATE users SET saldo_demo = saldo_demo + 10 WHERE id = ?', [refs[0].id]); 
+                }
             }
+
+            await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo, codigo_verificacion, estado_cuenta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "sin_verificar")', 
+                [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial, codigo_verificacion]
+            );
         }
 
-        await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
-            [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial]
-        );
-        res.status(201).json({ mensaje: 'Cuenta creada. En revisión KYC.' });
+        // ENVIAR EL CORREO
+        try {
+            await transporter.sendMail({
+                from: '"Nomura Forex" <akirakobayashizh@gmail.com>',
+                to: email,
+                subject: 'Tu código de Verificación - Nomura Forex',
+                html: `
+                    <div style="font-family: Arial, sans-serif; text-align: center; padding: 30px; background: #181a20; color: white; border-radius: 8px;">
+                        <h2 style="color: #fcd535;">¡Bienvenido a Nomura Forex!</h2>
+                        <p style="color: #eaecef; font-size: 16px;">Para activar tu cuenta, ingresa este código de 6 dígitos:</p>
+                        <h1 style="font-size: 40px; letter-spacing: 8px; color: #0ecb81; background: #0b0e11; padding: 15px; display: inline-block; border-radius: 8px;">${codigo_verificacion}</h1>
+                        <p style="color: #848e9c; font-size: 12px; margin-top: 20px;">Si no solicitaste este registro, puedes ignorar este correo.</p>
+                    </div>
+                `
+            });
+        } catch (mailErr) {
+            console.log('Error enviando correo, pero el registro se guardó', mailErr);
+        }
+
+        res.status(201).json({ mensaje: 'Revisa tu correo para ingresar el código de verificación.' });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// =========================================================
+// 🔥 NUEVA RUTA PARA VERIFICAR EL CORREO
+// =========================================================
+app.post('/api/verificar-correo', async (req, res) => {
+    try {
+        const { email, codigo } = req.body;
+        const [users] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
+        
+        if (users.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
+        if (users[0].codigo_verificacion !== codigo) return res.status(400).json({ error: 'Código incorrecto o inválido' });
+
+        await pool.execute('UPDATE users SET estado_cuenta = "pendiente", codigo_verificacion = NULL WHERE email = ?', [email]);
+        res.json({ mensaje: '¡Correo verificado! Tu cuenta pasó a revisión KYC.' });
+    } catch (e) {
+        res.status(500).json({ error: 'Error en el servidor' });
+    }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -244,6 +285,7 @@ app.post('/api/login', async (req, res) => {
         if (users.length === 0) return res.status(401).json({ error: 'Credenciales inválidas' });
         const user = users[0];
         
+        if (user.estado_cuenta === 'sin_verificar') return res.status(403).json({ error: 'Debes verificar tu correo primero.' });
         if (user.estado_cuenta === 'pendiente') return res.status(403).json({ error: 'Cuenta en revisión KYC.' });
         if (user.estado_cuenta === 'rechazado') return res.status(403).json({ error: 'KYC rechazado.' });
 
@@ -256,6 +298,7 @@ app.post('/api/login', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error servidor' }); }
 });
 
+// ... (El resto de las rutas siguen intactas) ...
 app.post('/api/recuperar-password', upload.single('documento_recuperacion'), async (req, res) => {
     try {
         const { email, telefono } = req.body;
