@@ -43,9 +43,6 @@ const pool = mysql.createPool(dbConfig);
 
 const generateRandomId = () => Math.floor(Math.random() * 900000000) + 100000000;
 
-// =========================================================
-// 🔥 CONFIGURACIÓN DE CORREOS (NODEMAILER)
-// =========================================================
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -209,7 +206,6 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
         const hash = await bcrypt.hash(password, 10);
         
         const codigo_verificacion = Math.floor(100000 + Math.random() * 900000).toString();
-        // 🔥 NUEVO: CÓDIGO DE USUARIO DE 6 DÍGITOS
         const uid_visible = exist.length > 0 && exist[0].uid_visible ? exist[0].uid_visible : Math.floor(100000 + Math.random() * 900000).toString();
 
         if (exist.length > 0) {
@@ -233,7 +229,6 @@ app.post('/api/register', upload.fields([{ name: 'foto_perfil' }, { name: 'docum
                 }
             }
 
-            // Se inserta el uid_visible
             await pool.execute('INSERT INTO users (nombre, apellido, email, password_hash, foto_perfil, documento_identidad, pais, telefono, mi_codigo, saldo_demo, codigo_verificacion, estado_cuenta, uid_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "sin_verificar", ?)', 
                 [nombre, apellido, email, hash, foto_perfil, doc, pais, telefono, mi_codigo, saldo_inicial, codigo_verificacion, uid_visible]
             );
@@ -309,7 +304,6 @@ app.post('/api/recuperar-password', upload.single('documento_recuperacion'), asy
     } catch (e) { res.status(500).json({ error: 'Error al solicitar recuperación' }); }
 });
 
-// 🔥 SE AGREGA uid_visible A LA CONSULTA DEL PERFIL
 app.get('/api/user/perfil', verificarToken, async (req, res) => {
     try {
         const [users] = await pool.execute('SELECT id, uid_visible, nombre, apellido, email, pais, telefono, foto_perfil, saldo_demo, mi_codigo, estado_cuenta FROM users WHERE id = ?', [req.user.id]);
@@ -333,12 +327,16 @@ app.post('/api/user/actualizar-foto', verificarToken, upload.single('foto_perfil
     } catch (e) { res.status(500).json({ error: 'Error al actualizar' }); }
 });
 
+// 🔥 NUEVA RUTA DE RECARGA CON TXID (HASH)
 app.post('/api/user/recarga', verificarToken, async (req, res) => {
     try {
+        const { monto, txid } = req.body;
+        if (!monto || !txid) return res.status(400).json({ error: 'Debes completar el monto y el TXID.' });
+        
         const transId = generateRandomId();
-        await pool.execute('INSERT INTO transactions (user_id, tipo, monto, trans_id) VALUES (?, "recarga", ?, ?)', [req.user.id, req.body.monto, transId]);
-        res.json({ mensaje: 'Solicitud enviada.', trans_id: transId });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+        await pool.execute('INSERT INTO transactions (user_id, tipo, monto, trans_id, txid_crypto) VALUES (?, "recarga", ?, ?, ?)', [req.user.id, monto, transId, txid]);
+        res.json({ mensaje: 'Solicitud enviada exitosamente.', trans_id: transId });
+    } catch (e) { res.status(500).json({ error: 'Error en el servidor' }); }
 });
 
 app.post('/api/user/retiro', verificarToken, upload.single('documento_retiro'), async (req, res) => {
